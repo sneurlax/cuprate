@@ -1456,6 +1456,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuprate-regtest"
+version = "0.1.0"
+dependencies = [
+ "cuprate-blockchain",
+ "cuprate-consensus-rules",
+ "cuprate-database",
+ "cuprate-helper",
+ "cuprate-types",
+ "monero-oxide",
+ "tempfile",
+]
+
+[[package]]
 name = "cuprate-rpc-interface"
 version = "0.0.0"
 dependencies = [

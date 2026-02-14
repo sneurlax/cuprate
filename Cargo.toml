@@ -50,6 +50,9 @@ members = [
 	"pruning",
 	"test-utils",
 
+	# Regtest
+	"regtest",
+
 	# Fuzz
 	"fuzz"
 ]
@@ -107,6 +110,9 @@ default-members = [
 	"helper",
 	"pruning",
 	"test-utils",
+
+	# Regtest
+	"regtest",
 ]
 
 [profile.release]

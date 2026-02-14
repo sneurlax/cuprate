@@ -1,0 +1,17 @@
+[package]
+name        = "cuprate-regtest"
+version     = "0.0.0"
+edition     = "2021"
+description = "regtest node for integration testing"
+
+[dependencies]
+cuprate-blockchain        = { path = "../storage/blockchain" }
+cuprate-database          = { path = "../storage/database" }
+cuprate-consensus-rules   = { path = "../consensus/rules" }
+cuprate-helper            = { path = "../helper", features = ["fs"] }
+cuprate-types             = { path = "../types/types" }
+monero-oxide              = { git = "https://github.com/monero-oxide/monero-oxide.git", rev = "7c288b058ae7f1e3d36600a2af11b3176102bcfc", features = ["std"] }
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"
