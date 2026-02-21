@@ -1464,8 +1464,11 @@ dependencies = [
  "cuprate-database",
  "cuprate-helper",
  "cuprate-types",
+ "curve25519-dalek",
  "monero-oxide",
+ "monero-wallet",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -1902,7 +1905,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ea41269bd490d251b9eca50ccb43117e641cc68b129849757c15ece88fe0574"
 dependencies = [
  "heck",
- "indexmap 2.12.0",
+ "indexmap 1.9.3",
  "itertools 0.14.0",
  "proc-macro-crate",
  "proc-macro2",
@@ -3472,7 +3475,7 @@ version = "0.1.4-alpha"
 source = "git+https://github.com/monero-oxide/monero-oxide.git?rev=7c288b058ae7f1e3d36600a2af11b3176102bcfc#7c288b058ae7f1e3d36600a2af11b3176102bcfc"
 dependencies = [
  "curve25519-dalek",
- "hex-literal 1.1.0",
+ "hex-literal 0.4.1",
  "monero-borromean",
  "monero-bulletproofs",
  "monero-clsag",
@@ -3523,6 +3526,26 @@ dependencies = [
  "monero-rpc",
  "simple-request",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "monero-wallet"
+version = "0.1.0"
+source = "git+https://github.com/monero-oxide/monero-oxide.git?rev=7c288b058ae7f1e3d36600a2af11b3176102bcfc#7c288b058ae7f1e3d36600a2af11b3176102bcfc"
+dependencies = [
+ "curve25519-dalek",
+ "hex",
+ "monero-address",
+ "monero-clsag",
+ "monero-oxide",
+ "monero-rpc",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "std-shims",
+ "thiserror 2.0.17",
  "zeroize",
 ]
 
@@ -4208,7 +4231,7 @@ dependencies = [
  "derive-deftly",
  "libc",
  "paste",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

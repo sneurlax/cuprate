@@ -13,6 +13,10 @@
 //! PoW hash is always `[0u8; 32]`; difficulty is always 1.
 //! The default coinbase output key is a fixed, well-known public point.
 
+pub mod decoy_rpc;
+pub use decoy_rpc::RegtestDecoyRpc;
+
+use std::sync::Arc;
 use tempfile::TempDir;
 
 use monero_oxide::{
@@ -38,10 +42,10 @@ use cuprate_types::{ExtendedBlockHeader, VerifiedBlockInformation};
 ///
 /// A fixed, publicly-known point (the Ed25519 basepoint G) used as a dummy output key.
 const REGTEST_MINER_KEY: CompressedPoint = CompressedPoint([
-    0xe4, 0xa7, 0x38, 0x4d, 0xaf, 0xea, 0xc8, 0x85,
-    0xc0, 0x6c, 0x5e, 0x1a, 0x3a, 0x05, 0x16, 0x72,
-    0xf6, 0xf6, 0x5f, 0x90, 0x0a, 0x1e, 0x85, 0x01,
-    0x38, 0x95, 0xd1, 0x72, 0x24, 0xa7, 0x1b, 0x5b,
+    0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
 ]);
 
 /// Minimal coinbase tx: V1 for HF1-11, V2 (null proofs) for HF12+.
@@ -103,7 +107,7 @@ fn make_verified(
 /// [`mine_blocks_at_hf`](RegtestNode::mine_blocks_at_hf) to switch forks.
 /// Drop cleans up the temp directory automatically.
 pub struct RegtestNode {
-    env: ConcreteEnv,
+    env: Arc<ConcreteEnv>,
     _tmp: TempDir,
     /// Next block height to be mined (= number of blocks committed so far).
     height: usize,
@@ -123,7 +127,7 @@ impl RegtestNode {
         let config = ConfigBuilder::new()
             .data_directory(tmp.path().to_owned())
             .build();
-        let env = cuprate_blockchain::open(config).expect("open blockchain db");
+        let env = Arc::new(cuprate_blockchain::open(config).expect("open blockchain db"));
 
         let hf = HardFork::V1;
         let genesis_reward = calculate_block_reward(0, PENALTY_FREE_ZONE_1, 0, hf);
@@ -167,22 +171,22 @@ impl RegtestNode {
     }
 
     /// Number of blocks committed (genesis counts as 1).
-    pub fn height(&self) -> usize {
+    pub const fn height(&self) -> usize {
         self.height
     }
 
     /// Hash of the most-recently-committed block.
-    pub fn top_hash(&self) -> [u8; 32] {
+    pub const fn top_hash(&self) -> [u8; 32] {
         self.top_hash
     }
 
     /// Total coins minted so far.
-    pub fn already_generated_coins(&self) -> u64 {
+    pub const fn already_generated_coins(&self) -> u64 {
         self.already_generated_coins
     }
 
     /// The current hard fork version used when mining new blocks.
-    pub fn current_hf(&self) -> HardFork {
+    pub const fn current_hf(&self) -> HardFork {
         self.current_hf
     }
 
@@ -215,12 +219,41 @@ impl RegtestNode {
         }
     }
 
+    /// Returns a [`RegtestDecoyRpc`] with a height snapshot taken at call time.
+    pub fn decoy_rpc(&self) -> RegtestDecoyRpc {
+        RegtestDecoyRpc {
+            env: Arc::clone(&self.env),
+            height: self.height,
+        }
+    }
+
+    /// Commit a verified block to the DB and update all in-memory state.
+    fn commit_block(&mut self, verified: VerifiedBlockInformation, hf: HardFork) {
+        let block_hash = verified.block_hash;
+        let reward = verified.generated_coins;
+        {
+            let env_inner = self.env.env_inner();
+            let tx_rw = env_inner.tx_rw().expect("tx_rw");
+            {
+                let mut tables = env_inner.open_tables_mut(&tx_rw).expect("open_tables_mut");
+                add_block(&verified, &mut tables).expect("add_block");
+            }
+            TxRw::commit(tx_rw).expect("commit");
+        }
+        self.height += 1;
+        self.top_hash = block_hash;
+        self.already_generated_coins = self.already_generated_coins.saturating_add(reward);
+        let prev_rct = *self.rct_counts.last().unwrap_or(&0);
+        let new_rct = if hf >= HardFork::V12 { prev_rct + 1 } else { prev_rct };
+        self.blocks.push(verified.block);
+        self.rct_counts.push(new_rct);
+    }
+
     fn mine_one(&mut self) {
         let height = self.height;
         let hf = self.current_hf;
         let median_bw = penalty_free_zone(hf);
-        let reward =
-            calculate_block_reward(0, median_bw, self.already_generated_coins, hf);
+        let reward = calculate_block_reward(0, median_bw, self.already_generated_coins, hf);
 
         let miner_tx = build_coinbase_tx(height, reward, hf);
 
@@ -277,6 +310,7 @@ impl Default for RegtestNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use monero_wallet::rpc::DecoyRpc;
 
     #[test]
     fn genesis_block_is_committed() {
@@ -387,5 +421,80 @@ mod tests {
         let mut node = RegtestNode::new();
         node.mine_blocks_at_hf(1, HardFork::V16);
         assert_eq!(node.height(), 2, "height should advance to 2 after mining 1 HF16 block");
+    }
+
+    #[tokio::test]
+    async fn decoy_rpc_end_height_matches_node_height() {
+        let mut node = RegtestNode::new();
+        node.mine_blocks(5);
+        let rpc = node.decoy_rpc();
+        let end_height = rpc
+            .get_output_distribution_end_height()
+            .await
+            .expect("end_height");
+        assert_eq!(end_height, node.height(), "end_height should equal node height");
+    }
+
+    #[tokio::test]
+    async fn decoy_rpc_distribution_is_monotonic() {
+        let mut node = RegtestNode::new();
+        // Mine 10 HF12 blocks so we have 10 RCT outputs.
+        node.mine_blocks_at_hf(10, HardFork::V12);
+        let rpc = node.decoy_rpc();
+
+        let dist = rpc
+            .get_output_distribution(0..node.height())
+            .await
+            .expect("distribution");
+
+        assert_eq!(dist.len(), node.height(), "distribution length should equal chain height");
+
+        for w in dist.windows(2) {
+            assert!(
+                w[1] >= w[0],
+                "distribution must be non-decreasing: {:?}",
+                &w
+            );
+        }
+
+        assert_eq!(
+            *dist.last().unwrap(),
+            10_u64,
+            "last distribution entry should equal total RCT outputs"
+        );
+    }
+
+    #[tokio::test]
+    async fn decoy_rpc_outputs_and_lock_window() {
+        let mut node = RegtestNode::new();
+        // Genesis (HF1, no RCT) + 1 HF12 block => 1 RCT output at index 0.
+        node.mine_blocks_at_hf(1, HardFork::V12);
+
+        let rpc = node.decoy_rpc();
+
+        let outs = rpc.get_outs(&[0_u64]).await.expect("get_outs");
+        assert_eq!(outs.len(), 1, "should return 1 output");
+        assert_eq!(outs[0].height, 1, "output height should be 1");
+
+        // still within the 60-block coinbase lock window
+        let locked = rpc
+            .get_unlocked_outputs(&[0_u64], 1, false)
+            .await
+            .expect("get_unlocked_outputs (locked)");
+        assert_eq!(locked[0], None, "output should be locked at height 1");
+
+        // past the coinbase lock window; need a fresh snapshot at that height
+        let rpc62 = RegtestDecoyRpc {
+            env: Arc::clone(&rpc.env),
+            height: 62,
+        };
+        let unlocked = rpc62
+            .get_unlocked_outputs(&[0_u64], 62, false)
+            .await
+            .expect("get_unlocked_outputs (unlocked)");
+        assert!(
+            unlocked[0].is_some(),
+            "output should be unlocked at height 62"
+        );
     }
 }
