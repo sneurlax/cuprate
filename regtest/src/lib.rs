@@ -16,6 +16,9 @@
 pub mod decoy_rpc;
 pub use decoy_rpc::RegtestDecoyRpc;
 
+mod error;
+pub use error::RegtestError;
+
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -36,7 +39,7 @@ use cuprate_consensus_rules::{
     miner_tx::calculate_block_reward,
 };
 use cuprate_database::{ConcreteEnv, Env, EnvInner, TxRw};
-use cuprate_types::{ExtendedBlockHeader, VerifiedBlockInformation};
+use cuprate_types::{ExtendedBlockHeader, VerifiedBlockInformation, VerifiedTransactionInformation};
 
 /// Placeholder output key for non-scanned coinbase outputs (regtest only).
 ///
@@ -81,14 +84,16 @@ fn make_verified(
     height: usize,
     reward: u64,
     cumulative_difficulty: u128,
+    txs: Vec<VerifiedTransactionInformation>,
 ) -> VerifiedBlockInformation {
     let block_blob = block.serialize();
     let block_hash = block.hash();
-    let weight = block_blob.len();
+    let tx_weight: usize = txs.iter().map(|t| t.tx_blob.len()).sum();
+    let weight = block_blob.len() + tx_weight;
     VerifiedBlockInformation {
         block,
         block_blob,
-        txs: vec![],
+        txs,
         block_hash,
         pow_hash: [0_u8; 32],
         height,
@@ -119,6 +124,8 @@ pub struct RegtestNode {
     cumulative_difficulty: u128,
     /// The hard fork version used when mining new blocks.
     current_hf: HardFork,
+    /// Transactions pending inclusion in the next block.
+    pending_txs: Vec<VerifiedTransactionInformation>,
 }
 
 impl RegtestNode {
@@ -147,7 +154,7 @@ impl RegtestNode {
         .expect("build genesis block");
 
         let genesis_hash = genesis.hash();
-        let verified = make_verified(genesis, 0, genesis_reward, 1);
+        let verified = make_verified(genesis, 0, genesis_reward, 1, vec![]);
 
         {
             let env_inner = env.env_inner();
@@ -167,6 +174,7 @@ impl RegtestNode {
             already_generated_coins: genesis_reward,
             cumulative_difficulty: 1,
             current_hf: HardFork::V1,
+            pending_txs: vec![],
         }
     }
 
@@ -188,6 +196,27 @@ impl RegtestNode {
     /// The current hard fork version used when mining new blocks.
     pub const fn current_hf(&self) -> HardFork {
         self.current_hf
+    }
+
+    /// Number of transactions waiting in the mempool.
+    pub const fn mempool_size(&self) -> usize {
+        self.pending_txs.len()
+    }
+
+    /// Deserializes and enqueues a transaction. Returns the tx hash, or [`RegtestError::BadTxBlob`] on bad input.
+    pub fn submit_tx(&mut self, blob: Vec<u8>) -> Result<[u8; 32], RegtestError> {
+        let tx = Transaction::read(&mut blob.as_slice())
+            .map_err(|e| RegtestError::BadTxBlob(e.to_string()))?;
+        let tx_hash = tx.hash();
+        let tx_weight = blob.len();
+        self.pending_txs.push(VerifiedTransactionInformation {
+            tx,
+            tx_blob: blob,
+            tx_weight,
+            fee: 0,
+            tx_hash,
+        });
+        Ok(tx_hash)
     }
 
     /// Extended block header for the block at `height`.
@@ -257,6 +286,10 @@ impl RegtestNode {
 
         let miner_tx = build_coinbase_tx(height, reward, hf);
 
+        // Drain pending mempool transactions into this block.
+        let pending = std::mem::take(&mut self.pending_txs);
+        let tx_hashes: Vec<[u8; 32]> = pending.iter().map(|t| t.tx_hash).collect();
+
         // All regtest blocks share timestamp = 1 (genesis is 0).
         // For HF1 the timestamp check only activates after 60 blocks; since
         // median of 60 identical timestamps is 1 and block.timestamp == 1,
@@ -270,7 +303,7 @@ impl RegtestNode {
                 nonce: 0,
             },
             miner_tx,
-            vec![],
+            tx_hashes,
         )
         .expect("build block");
 
@@ -281,7 +314,7 @@ impl RegtestNode {
             height,
             reward,
             self.cumulative_difficulty,
-            self.already_generated_coins,
+            pending,
         );
 
         {
@@ -495,6 +528,56 @@ mod tests {
         assert!(
             unlocked[0].is_some(),
             "output should be unlocked at height 62"
+        );
+    }
+
+    /// Build a minimal serialized miner-style V1 transaction for test use.
+    /// Uses Input::Gen(999) so it is always parseable but not a valid spend.
+    fn dummy_tx_blob() -> Vec<u8> {
+        use monero_oxide::transaction::NotPruned;
+        let tx: Transaction<NotPruned> = Transaction::V1 {
+            prefix: TransactionPrefix {
+                additional_timelock: Timelock::Block(999 + 60),
+                inputs: vec![Input::Gen(999)],
+                outputs: vec![],
+                extra: vec![],
+            },
+            signatures: vec![],
+        };
+        tx.serialize()
+    }
+
+    #[test]
+    fn submit_tx_enters_mempool() {
+        let mut node = RegtestNode::new();
+        node.submit_tx(dummy_tx_blob()).expect("submit_tx must succeed");
+        assert_eq!(node.mempool_size(), 1, "mempool must contain 1 tx");
+    }
+
+    #[test]
+    fn mempool_drained_after_mine() {
+        let mut node = RegtestNode::new();
+        node.submit_tx(dummy_tx_blob()).expect("submit_tx");
+        assert_eq!(node.mempool_size(), 1);
+        node.mine_blocks(1);
+        assert_eq!(node.mempool_size(), 0, "mempool must be empty after mining");
+    }
+
+    #[test]
+    fn height_advances_after_mining_with_tx() {
+        let mut node = RegtestNode::new();
+        node.submit_tx(dummy_tx_blob()).expect("submit_tx");
+        node.mine_blocks(1);
+        assert_eq!(node.height(), 2, "height must advance to 2");
+    }
+
+    #[test]
+    fn bad_blob_returns_error() {
+        let mut node = RegtestNode::new();
+        let result = node.submit_tx(vec![0xde, 0xad, 0xbe, 0xef]);
+        assert!(
+            matches!(result, Err(RegtestError::BadTxBlob(_))),
+            "corrupt blob must return RegtestError::BadTxBlob"
         );
     }
 }
