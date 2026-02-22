@@ -54,6 +54,11 @@ pub struct Args {
     /// - Required network ports can be bound to
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Run in regtest mode: temp database, no PoW, instant block mining.
+    #[cfg(feature = "regtest")]
+    #[arg(long)]
+    pub regtest: bool,
 }
 
 impl Args {

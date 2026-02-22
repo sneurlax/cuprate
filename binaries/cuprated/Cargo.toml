@@ -10,6 +10,7 @@ repository = "https://github.com/Cuprate/cuprate/tree/main/binaries/cuprated"
 [features]
 default = ["arti"]
 arti = ["arti-client", "tor-hsservice", "tor-persist", "tor-rtcompat", "cuprate-p2p-transport/arti"]
+regtest = ["dep:cuprate-regtest"]
 
 [dependencies]
 # TODO: after v1.0.0, remove unneeded dependencies.
@@ -41,6 +42,7 @@ cuprate-test-utils        = { workspace = true }
 cuprate-txpool            = { workspace = true }
 cuprate-types             = { workspace = true, features = ["json"] }
 cuprate-wire              = { workspace = true }
+cuprate-regtest           = { path = "../../regtest", optional = true }
 
 # TODO: after v1.0.0, remove unneeded dependencies.
 axum                  = { workspace = true, features = ["tokio", "http1", "http2"] }

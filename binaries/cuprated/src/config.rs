@@ -114,6 +114,12 @@ pub fn read_config_and_args() -> Config {
         config.dry_run_check();
     }
 
+    #[cfg(feature = "regtest")]
+    if args.regtest {
+        crate::regtest::run_regtest();
+        std::process::exit(0);
+    }
+
     config
 }
 

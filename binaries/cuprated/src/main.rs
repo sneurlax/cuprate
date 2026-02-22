@@ -43,6 +43,8 @@ mod config;
 mod constants;
 mod logging;
 mod p2p;
+#[cfg(feature = "regtest")]
+mod regtest;
 mod rpc;
 mod signals;
 mod statics;
