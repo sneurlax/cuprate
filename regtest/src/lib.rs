@@ -22,11 +22,15 @@ pub use error::RegtestError;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+use curve25519_dalek::{constants::ED25519_BASEPOINT_TABLE, EdwardsPoint, Scalar};
+
 use monero_oxide::{
     block::{Block, BlockHeader},
-    io::CompressedPoint,
+    io::{CompressedPoint, VarInt},
+    primitives::{keccak256, keccak256_to_scalar},
     transaction::{Input, Output, Timelock, Transaction, TransactionPrefix},
 };
+use monero_wallet::rpc::ScannableBlock;
 
 use cuprate_blockchain::{
     config::ConfigBuilder,
@@ -50,6 +54,57 @@ const REGTEST_MINER_KEY: CompressedPoint = CompressedPoint([
     0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
     0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
 ]);
+
+fn derive_coinbase_output_from_pubkey(
+    spend_pub: &EdwardsPoint,
+    view_pub: &EdwardsPoint,
+    tx_scalar: &Scalar,
+    output_index: usize,
+) -> (EdwardsPoint, u8) {
+    let ecdh = tx_scalar * view_pub;
+    let ecdh8 = ecdh.mul_by_cofactor();
+    let ecdh8_bytes = ecdh8.compress().to_bytes();
+
+    let mut derivation = ecdh8_bytes.to_vec();
+    VarInt::write(&output_index, &mut derivation).expect("vec write");
+
+    let view_tag = keccak256([b"view_tag".as_slice(), &derivation].concat())[0];
+    let shared_key = keccak256_to_scalar(&derivation);
+    let output_key = &shared_key * ED25519_BASEPOINT_TABLE + spend_pub;
+
+    (output_key, view_tag)
+}
+
+fn build_scannable_coinbase_tx(
+    chain_height: usize,
+    reward: u64,
+    spend_pub: &EdwardsPoint,
+    view_pub: &EdwardsPoint,
+) -> Transaction {
+    use rand::rngs::OsRng;
+
+    let tx_scalar = Scalar::random(&mut OsRng);
+    let tx_pub = &tx_scalar * ED25519_BASEPOINT_TABLE;
+
+    let (output_key, view_tag) =
+        derive_coinbase_output_from_pubkey(spend_pub, view_pub, &tx_scalar, 0);
+
+    let mut extra = vec![0x01_u8];
+    extra.extend_from_slice(&tx_pub.compress().to_bytes());
+
+    let prefix = TransactionPrefix {
+        additional_timelock: Timelock::Block(chain_height + 60),
+        inputs: vec![Input::Gen(chain_height)],
+        outputs: vec![Output {
+            amount: Some(reward),
+            key: CompressedPoint(output_key.compress().to_bytes()),
+            view_tag: Some(view_tag),
+        }],
+        extra,
+    };
+
+    Transaction::V2 { prefix, proofs: None }
+}
 
 /// Minimal coinbase tx: V1 for HF1-11, V2 (null proofs) for HF12+.
 fn build_coinbase_tx(chain_height: usize, reward: u64, hf: HardFork) -> Transaction {
@@ -126,6 +181,11 @@ pub struct RegtestNode {
     current_hf: HardFork,
     /// Transactions pending inclusion in the next block.
     pending_txs: Vec<VerifiedTransactionInformation>,
+    /// All committed blocks in order, indexed by height.
+    blocks: Vec<Block>,
+    /// Cumulative `RingCT` output count after each committed block, indexed by height.
+    /// `rct_counts[h]` = total RCT outputs in blocks 0..=h.
+    rct_counts: Vec<u64>,
 }
 
 impl RegtestNode {
@@ -155,6 +215,7 @@ impl RegtestNode {
 
         let genesis_hash = genesis.hash();
         let verified = make_verified(genesis, 0, genesis_reward, 1, vec![]);
+        let genesis_clone = verified.block.clone();
 
         {
             let env_inner = env.env_inner();
@@ -175,6 +236,9 @@ impl RegtestNode {
             cumulative_difficulty: 1,
             current_hf: HardFork::V1,
             pending_txs: vec![],
+            // Genesis is V1, no RingCT outputs.
+            blocks: vec![genesis_clone],
+            rct_counts: vec![0],
         }
     }
 
@@ -290,10 +354,8 @@ impl RegtestNode {
         let pending = std::mem::take(&mut self.pending_txs);
         let tx_hashes: Vec<[u8; 32]> = pending.iter().map(|t| t.tx_hash).collect();
 
-        // All regtest blocks share timestamp = 1 (genesis is 0).
-        // For HF1 the timestamp check only activates after 60 blocks; since
-        // median of 60 identical timestamps is 1 and block.timestamp == 1,
-        // the check passes once consensus validation is eventually enabled.
+        // Timestamp=1 for all blocks (genesis=0). HF1 timestamp check doesn't activate
+        // until 60 blocks, so median(60 × 1) == 1 == block.timestamp when it does.
         let block = Block::new(
             BlockHeader {
                 hardfork_version: hf as u8,
@@ -308,29 +370,62 @@ impl RegtestNode {
         .expect("build block");
 
         self.cumulative_difficulty += 1;
-        let block_hash = block.hash();
-        let verified = make_verified(
+        let verified = make_verified(block, height, reward, self.cumulative_difficulty, pending);
+        self.commit_block(verified, hf);
+    }
+
+    /// Mines one block with a wallet-scannable coinbase output (always HF12+, V2).
+    pub fn mine_to(&mut self, spend_pub: &EdwardsPoint, view_pub: &EdwardsPoint) {
+        let height = self.height;
+        // mine_to always uses V2 coinbase; advertise at least HF12 in the header.
+        let hf = if self.current_hf >= HardFork::V12 {
+            self.current_hf
+        } else {
+            HardFork::V12
+        };
+        let median_bw = penalty_free_zone(hf);
+        let reward = calculate_block_reward(0, median_bw, self.already_generated_coins, hf);
+
+        let miner_tx = build_scannable_coinbase_tx(height, reward, spend_pub, view_pub);
+
+        let pending = std::mem::take(&mut self.pending_txs);
+        let tx_hashes: Vec<[u8; 32]> = pending.iter().map(|t| t.tx_hash).collect();
+
+        let block = Block::new(
+            BlockHeader {
+                hardfork_version: hf as u8,
+                hardfork_signal: hf as u8,
+                timestamp: 1,
+                previous: self.top_hash,
+                nonce: 0,
+            },
+            miner_tx,
+            tx_hashes,
+        )
+        .expect("build block");
+
+        self.cumulative_difficulty += 1;
+        let verified = make_verified(block, height, reward, self.cumulative_difficulty, pending);
+        self.commit_block(verified, hf);
+    }
+
+    /// Returns the block at `height` as a [`ScannableBlock`], or `None` if out of range.
+    pub fn scannable_block(&self, height: usize) -> Option<ScannableBlock> {
+        let block = self.blocks.get(height)?.clone();
+
+        // Genesis (height 0) is V1 with no RCT outputs, so output_index is None.
+        // For H > 0, the first RCT output in this block starts at rct_counts[H-1].
+        let output_index = if height == 0 {
+            None
+        } else {
+            self.rct_counts.get(height - 1).copied()
+        };
+
+        Some(ScannableBlock {
             block,
-            height,
-            reward,
-            self.cumulative_difficulty,
-            pending,
-        );
-
-        {
-            let env_inner = self.env.env_inner();
-            let tx_rw = env_inner.tx_rw().expect("tx_rw");
-            {
-                let mut tables = env_inner.open_tables_mut(&tx_rw).expect("open_tables_mut");
-                add_block(&verified, &mut tables).expect("add_block");
-            }
-            TxRw::commit(tx_rw).expect("commit");
-        }
-
-        self.height += 1;
-        self.top_hash = block_hash;
-        self.already_generated_coins =
-            self.already_generated_coins.saturating_add(reward);
+            transactions: vec![],
+            output_index_for_first_ringct_output: output_index,
+        })
     }
 }
 
@@ -344,12 +439,14 @@ impl Default for RegtestNode {
 mod tests {
     use super::*;
     use monero_wallet::rpc::DecoyRpc;
+    // Satisfy `unused_crate_dependencies`: zeroize is only used in integration tests.
+    use zeroize as _;
 
     #[test]
     fn genesis_block_is_committed() {
         let node = RegtestNode::new();
         assert_eq!(node.height(), 1, "height after genesis should be 1");
-        assert_ne!(node.top_hash(), [0u8; 32], "top_hash should not be all-zeros");
+        assert_ne!(node.top_hash(), [0_u8; 32], "top_hash should not be all-zeros");
     }
 
     #[test]
@@ -531,9 +628,8 @@ mod tests {
         );
     }
 
-    /// Build a minimal serialized miner-style V1 transaction for test use.
-    /// Uses Input::Gen(999) so it is always parseable but not a valid spend.
     fn dummy_tx_blob() -> Vec<u8> {
+        // coinbase-shaped V1 tx with Input::Gen(999); parses cleanly, fails consensus validation
         use monero_oxide::transaction::NotPruned;
         let tx: Transaction<NotPruned> = Transaction::V1 {
             prefix: TransactionPrefix {

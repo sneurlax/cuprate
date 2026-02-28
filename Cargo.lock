@@ -1462,13 +1462,15 @@ dependencies = [
  "cuprate-blockchain",
  "cuprate-consensus-rules",
  "cuprate-database",
- "cuprate-helper",
  "cuprate-types",
  "curve25519-dalek",
  "monero-oxide",
  "monero-wallet",
+ "rand 0.8.5",
  "tempfile",
+ "thiserror 2.0.17",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -1650,6 +1652,7 @@ dependencies = [
  "cuprate-p2p-core",
  "cuprate-p2p-transport",
  "cuprate-pruning",
+ "cuprate-regtest",
  "cuprate-rpc-interface",
  "cuprate-rpc-types",
  "cuprate-test-utils",

@@ -195,6 +195,7 @@ hex-literal           = { version = "1", default-features = false }
 indexmap              = { version = "2", default-features = false }
 monero-address        = { git = "https://github.com/monero-oxide/monero-oxide.git", rev = "7c288b058ae7f1e3d36600a2af11b3176102bcfc", default-features = false }
 monero-oxide          = { git = "https://github.com/monero-oxide/monero-oxide.git", rev = "7c288b058ae7f1e3d36600a2af11b3176102bcfc", default-features = false, features = ["std"] }
+monero-wallet         = { git = "https://github.com/monero-oxide/monero-oxide.git", rev = "7c288b058ae7f1e3d36600a2af11b3176102bcfc", package = "monero-wallet", default-features = false, features = ["std"] }
 nu-ansi-term          = { version = "0.46", default-features = false }
 paste                 = { version = "1", default-features = false }
 pin-project           = { version = "1", default-features = false }
@@ -226,6 +227,7 @@ tor-rtcompat          = { version = "0.33", default-features = false }
 tracing-appender      = { version = "0.2", default-features = false }
 tracing-subscriber    = { version = "0.3", default-features = false }
 tracing               = { version = "0.1", default-features = false }
+zeroize               = { version = "1", default-features = false }
 
 ## workspace.dev-dependencies
 monero-rpc                = { git = "https://github.com/monero-oxide/monero-oxide.git", rev = "7c288b058ae7f1e3d36600a2af11b3176102bcfc" }
