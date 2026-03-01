@@ -80,9 +80,13 @@ async fn spend_cycle_mine_scan_mature_spend_mine() {
     let mut node = RegtestNode::new();
     node.set_hard_fork(HardFork::V16);
     node.mine_to(&spend_pub, &view_pub);
-    // output at height 1 needs 60 more to clear the coinbase lock
-    node.mine_blocks(60);
-    assert_eq!(node.height(), 62);
+    // The decoy selector uses a gamma distribution calibrated for mainnet.
+    // On a short chain most candidates fall in the 60-block coinbase lock
+    // window and are rejected, which exhausts the candidate pool before 16
+    // unlocked decoys are found.  200 extra blocks push the locked fraction
+    // well below 50 %, letting the selector converge.
+    node.mine_blocks(200);
+    assert_eq!(node.height(), 202);
 
     let scannable = node.scannable_block(1).expect("scannable_block(1)");
     let timelocked = scanner.scan(scannable).expect("scan");
@@ -105,5 +109,5 @@ async fn spend_cycle_mine_scan_mature_spend_mine() {
     assert_ne!(tx_hash, [0_u8; 32]);
 
     node.mine_blocks(1);
-    assert_eq!(node.height(), 63);
+    assert_eq!(node.height(), 203);
 }
