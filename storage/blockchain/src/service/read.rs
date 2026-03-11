@@ -30,7 +30,7 @@ use cuprate_helper::map::combine_low_high_bits_to_u128;
 use cuprate_types::{
     blockchain::{BlockchainReadRequest, BlockchainResponse},
     output_cache::OutputCache,
-    rpc::OutputHistogramInput,
+    rpc::{OutputDistributionData, OutputHistogramInput},
     Chain, ChainId, ExtendedBlockHeader, OutputDistributionInput, OutputOnChain, TxsInBlock,
 };
 
@@ -1006,5 +1006,66 @@ fn tx_output_indexes(env: &ConcreteEnv, tx_hash: &[u8; 32]) -> ResponseResult {
 
 /// [`BlockchainReadRequest::OutputDistribution`]
 fn output_distribution(env: &ConcreteEnv, input: OutputDistributionInput) -> ResponseResult {
-    Ok(BlockchainResponse::OutputDistribution(todo!()))
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro()?;
+    let table_block_infos = env_inner.open_db_ro::<BlockInfos>(&tx_ro)?;
+    let table_block_heights = env_inner.open_db_ro::<BlockHeights>(&tx_ro)?;
+
+    let chain_height = crate::ops::blockchain::chain_height(&table_block_heights)?;
+
+    let from = input.from_height as usize;
+    let to = input
+        .to_height
+        .map(|h| (h.get() as usize).min(chain_height.saturating_sub(1)))
+        .unwrap_or_else(|| chain_height.saturating_sub(1));
+
+    let mut result = Vec::with_capacity(input.amounts.len());
+
+    for &amount in &input.amounts {
+        if amount != 0 {
+            // pre-RCT amounts: per-block counts aren't tracked in BlockInfo.
+            result.push(OutputDistributionData {
+                amount,
+                distribution: vec![0u64; to.saturating_sub(from).saturating_add(1)],
+                start_height: from as u64,
+                base: 0,
+            });
+            continue;
+        }
+
+        let base = if from > 0 {
+            get_block_info(&from.saturating_sub(1), &table_block_infos)
+                .map(|bi| bi.cumulative_rct_outs)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let len = if to >= from { to - from + 1 } else { 0 };
+        let mut distribution = Vec::with_capacity(len);
+        let mut prev_cumulative = base;
+
+        for h in from..=to {
+            let cumulative = match get_block_info(&h, &table_block_infos) {
+                Ok(bi) => bi.cumulative_rct_outs,
+                Err(RuntimeError::KeyNotFound) => prev_cumulative,
+                Err(e) => return Err(e),
+            };
+            distribution.push(if input.cumulative {
+                cumulative
+            } else {
+                cumulative - prev_cumulative
+            });
+            prev_cumulative = cumulative;
+        }
+
+        result.push(OutputDistributionData {
+            amount,
+            distribution,
+            start_height: from as u64,
+            base,
+        });
+    }
+
+    Ok(BlockchainResponse::OutputDistribution(result))
 }
