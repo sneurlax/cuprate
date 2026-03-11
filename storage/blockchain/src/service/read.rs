@@ -31,7 +31,7 @@ use cuprate_types::{
     blockchain::{BlockchainReadRequest, BlockchainResponse},
     output_cache::OutputCache,
     rpc::OutputHistogramInput,
-    Chain, ChainId, ExtendedBlockHeader, OutputDistributionInput, TxsInBlock,
+    Chain, ChainId, ExtendedBlockHeader, OutputDistributionInput, OutputOnChain, TxsInBlock,
 };
 
 use crate::{
@@ -561,7 +561,37 @@ fn outputs_vec(
     outputs: Vec<(Amount, AmountIndex)>,
     get_txid: bool,
 ) -> ResponseResult {
-    Ok(BlockchainResponse::OutputsVec(todo!()))
+    // Prepare tx/tables in `ThreadLocal`.
+    let env_inner = env.env_inner();
+    let tx_ro = thread_local(env);
+    let tables = thread_local(env);
+
+    // Collect results using `rayon`, preserving original indices for reordering.
+    let mut indexed: Vec<(usize, Amount, AmountIndex, OutputOnChain)> = outputs
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, (amount, amount_index))| {
+            let tx_ro = tx_ro.get_or_try(|| env_inner.tx_ro())?;
+            let tables = get_tables!(env_inner, tx_ro, tables)?.as_ref();
+            let id = PreRctOutputId {
+                amount,
+                amount_index,
+            };
+            let output_on_chain = id_to_output_on_chain(&id, get_txid, tables)?;
+            Ok((i, amount, amount_index, output_on_chain))
+        })
+        .collect::<DbResult<_>>()?;
+
+    // Restore request order.
+    indexed.sort_unstable_by_key(|(i, ..)| *i);
+
+    // Group by amount in first-appearance order.
+    let mut grouped: IndexMap<Amount, Vec<(AmountIndex, OutputOnChain)>> = IndexMap::new();
+    for (_, amount, amount_index, output_on_chain) in indexed {
+        grouped.entry(amount).or_default().push((amount_index, output_on_chain));
+    }
+
+    Ok(BlockchainResponse::OutputsVec(grouped.into_iter().collect()))
 }
 
 /// [`BlockchainReadRequest::NumberOutputsWithAmount`].
