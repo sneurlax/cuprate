@@ -415,6 +415,50 @@ async fn v16_tx0() {
     .await;
 }
 
+/// Assert [`BlockchainReadRequest::OutputsVec`] returns outputs grouped by amount.
+#[tokio::test]
+async fn outputs_vec_service() {
+    let (reader, mut writer, env, _tempdir) = init_service();
+
+    let mut block = BLOCK_V16_TX0.clone();
+    block.height = 0;
+    writer
+        .call(BlockchainWriteRequest::WriteBlock(block))
+        .await
+        .unwrap();
+
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro().unwrap();
+    let tables = env_inner.open_tables(&tx_ro).unwrap();
+    let expected = id_to_output_on_chain(
+        &PreRctOutputId {
+            amount: 0,
+            amount_index: 0,
+        },
+        false,
+        &tables,
+    )
+    .unwrap();
+
+    let request = BlockchainReadRequest::OutputsVec {
+        outputs: vec![(0, 0)],
+        get_txid: false,
+    };
+    let response = reader.clone().oneshot(request).await.unwrap();
+
+    let BlockchainResponse::OutputsVec(groups) = response else {
+        panic!("unexpected response variant: {response:#?}");
+    };
+
+    assert_eq!(groups.len(), 1);
+    let (amount, entries) = &groups[0];
+    assert_eq!(*amount, 0u64);
+    assert_eq!(entries.len(), 1);
+    let (amount_index, output_on_chain) = &entries[0];
+    assert_eq!(*amount_index, 0u64);
+    assert_eq!(*output_on_chain, expected);
+}
+
 /// Tests the alt-chain requests and responses.
 #[tokio::test]
 async fn alt_chain_requests() {
