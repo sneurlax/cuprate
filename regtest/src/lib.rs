@@ -682,4 +682,58 @@ mod tests {
             "corrupt blob must return RegtestError::BadTxBlob"
         );
     }
+
+    #[tokio::test]
+    async fn service_decoy_rpc_distribution_matches_db() {
+        let mut node = RegtestNode::new();
+        // mine 5 HF12 blocks -> 5 RCT outputs
+        node.mine_blocks_at_hf(5, HardFork::V12);
+
+        let rpc = node.decoy_rpc();
+
+        let dist = rpc
+            .get_output_distribution(0..node.height())
+            .await
+            .expect("distribution");
+        assert_eq!(
+            dist.len(),
+            node.height(),
+            "distribution length must equal chain height"
+        );
+
+        // genesis is HF1 (no RCT); each of the 5 HF12 blocks adds 1
+        let expected_total = 5_u64;
+        assert_eq!(*dist.last().unwrap(), expected_total, "tip should be 5");
+
+        let all_indexes: Vec<u64> = (0..expected_total).collect();
+        let outs = rpc.get_outs(&all_indexes).await.expect("get_outs");
+        assert_eq!(outs.len(), expected_total as usize);
+
+        let end_height = rpc
+            .get_output_distribution_end_height()
+            .await
+            .expect("end height");
+        assert_eq!(end_height, node.height());
+    }
+
+    #[tokio::test]
+    async fn detached_decoy_rpc_works_independently() {
+        let mut node = RegtestNode::new();
+        node.mine_blocks_at_hf(3, HardFork::V12);
+
+        // snapshot at height 4 (genesis + 3 HF12 blocks)
+        let rpc = node.decoy_rpc();
+
+        node.mine_blocks_at_hf(2, HardFork::V12);
+
+        let end_h = rpc
+            .get_output_distribution_end_height()
+            .await
+            .expect("end_height");
+        assert_eq!(end_h, 4, "snapshot height");
+
+        // DB is shared, so post-snapshot outputs are still readable
+        let outs = rpc.get_outs(&[0_u64]).await.expect("get_outs");
+        assert_eq!(outs.len(), 1);
+    }
 }
