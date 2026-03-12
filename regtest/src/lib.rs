@@ -327,7 +327,7 @@ impl RegtestNode {
     }
 
     /// Commit a verified block to the DB and update all in-memory state.
-    fn commit_block(&mut self, verified: VerifiedBlockInformation, hf: HardFork) {
+    fn commit_block(&mut self, verified: VerifiedBlockInformation, rct_outs_in_block: u64) {
         let block_hash = verified.block_hash;
         let reward = verified.generated_coins;
         {
@@ -343,9 +343,8 @@ impl RegtestNode {
         self.top_hash = block_hash;
         self.already_generated_coins = self.already_generated_coins.saturating_add(reward);
         let prev_rct = *self.rct_counts.last().unwrap_or(&0);
-        let new_rct = if hf >= HardFork::V12 { prev_rct + 1 } else { prev_rct };
         self.blocks.push(verified.block);
-        self.rct_counts.push(new_rct);
+        self.rct_counts.push(prev_rct + rct_outs_in_block);
     }
 
     fn mine_one(&mut self) {
@@ -355,10 +354,20 @@ impl RegtestNode {
         let reward = calculate_block_reward(0, median_bw, self.already_generated_coins, hf);
 
         let miner_tx = build_coinbase_tx(height, reward, hf);
+        let miner_rct: u64 = if hf >= HardFork::V12 {
+            miner_tx.prefix().outputs.len() as u64
+        } else {
+            0
+        };
 
         // Drain pending mempool transactions into this block.
         let pending = std::mem::take(&mut self.pending_txs);
         let tx_hashes: Vec<[u8; 32]> = pending.iter().map(|t| t.tx_hash).collect();
+        let tx_rct: u64 = pending
+            .iter()
+            .filter(|t| matches!(t.tx, Transaction::V2 { .. }))
+            .map(|t| t.tx.prefix().outputs.len() as u64)
+            .sum();
 
         // Timestamp=1 for all blocks (genesis=0). HF1 timestamp check doesn't activate
         // until 60 blocks, so median(60 × 1) == 1 == block.timestamp when it does.
@@ -377,7 +386,7 @@ impl RegtestNode {
 
         self.cumulative_difficulty += 1;
         let verified = make_verified(block, height, reward, self.cumulative_difficulty, pending);
-        self.commit_block(verified, hf);
+        self.commit_block(verified, miner_rct + tx_rct);
     }
 
     /// Mines one block with a wallet-scannable coinbase output (always HF12+, V2).
@@ -393,9 +402,16 @@ impl RegtestNode {
         let reward = calculate_block_reward(0, median_bw, self.already_generated_coins, hf);
 
         let miner_tx = build_scannable_coinbase_tx(height, reward, spend_pub, view_pub);
+        // mine_to always builds a V2 coinbase.
+        let miner_rct = miner_tx.prefix().outputs.len() as u64;
 
         let pending = std::mem::take(&mut self.pending_txs);
         let tx_hashes: Vec<[u8; 32]> = pending.iter().map(|t| t.tx_hash).collect();
+        let tx_rct: u64 = pending
+            .iter()
+            .filter(|t| matches!(t.tx, Transaction::V2 { .. }))
+            .map(|t| t.tx.prefix().outputs.len() as u64)
+            .sum();
 
         let block = Block::new(
             BlockHeader {
@@ -412,7 +428,7 @@ impl RegtestNode {
 
         self.cumulative_difficulty += 1;
         let verified = make_verified(block, height, reward, self.cumulative_difficulty, pending);
-        self.commit_block(verified, hf);
+        self.commit_block(verified, miner_rct + tx_rct);
     }
 
     /// Returns the block at `height` as a [`ScannableBlock`], or `None` if out of range.
