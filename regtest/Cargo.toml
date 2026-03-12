@@ -8,16 +8,18 @@ description = "regtest node for integration testing"
 workspace = true
 
 [dependencies]
-cuprate-blockchain      = { path = "../storage/blockchain" }
-cuprate-database        = { path = "../storage/database" }
-cuprate-consensus-rules = { path = "../consensus/rules" }
-cuprate-types           = { path = "../types/types" }
-monero-oxide            = { workspace = true }
-monero-wallet           = { workspace = true }
-curve25519-dalek        = { workspace = true, features = ["alloc"] }
-rand                    = { workspace = true, features = ["std", "getrandom"] }
-tempfile                = { workspace = true }
-thiserror               = { workspace = true }
+cuprate-blockchain        = { path = "../storage/blockchain" }
+cuprate-database          = { path = "../storage/database" }
+cuprate-database-service  = { path = "../storage/service" }
+cuprate-consensus-rules   = { path = "../consensus/rules" }
+cuprate-types             = { path = "../types/types" }
+monero-oxide              = { workspace = true }
+monero-wallet             = { workspace = true }
+curve25519-dalek          = { workspace = true, features = ["alloc"] }
+rand                      = { workspace = true, features = ["std", "getrandom"] }
+tempfile                  = { workspace = true }
+thiserror                 = { workspace = true }
+tower                     = { workspace = true, features = ["util"] }
 
 [dev-dependencies]
 tokio   = { workspace = true, features = ["rt", "macros"] }

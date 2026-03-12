@@ -1,79 +1,23 @@
-#![allow(clippy::significant_drop_tightening)]
-//! [`DecoyRpc`] impl backed directly by the regtest heed DB.
-//!
-//! Accesses [`ConcreteEnv`] synchronously inside the `async move` bodies so
-//! we don't need a separate blockchain read service. HF12+ blocks each
-//! contribute one RCT coinbase output; earlier blocks contribute none.
-//! The cumulative distribution is read from the [`RctOutputs`] table that
-//! `add_block` keeps up to date.
+//! [`DecoyRpc`] impl backed by the blockchain read service.
 
 use std::ops::RangeBounds;
-use std::sync::Arc;
 
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint as DalekEdwardsPoint};
 
 use monero_oxide::COINBASE_LOCK_WINDOW;
 use monero_wallet::rpc::{DecoyRpc, OutputInformation, RpcError};
 
-use cuprate_blockchain::{
-    ops::output::{get_rct_num_outputs, get_rct_output},
-    tables::{OpenTables, Tables},
-};
-use cuprate_database::{ConcreteEnv, Env, EnvInner};
+use tower::{Service, ServiceExt};
 
-/// [`DecoyRpc`] backed by the regtest DB. Obtain via [`crate::RegtestNode::decoy_rpc`].
+use cuprate_blockchain::service::BlockchainReadHandle;
+use cuprate_types::blockchain::{BlockchainReadRequest, BlockchainResponse};
+
+/// [`DecoyRpc`] backed by the blockchain read service.
 #[derive(Clone)]
 pub struct RegtestDecoyRpc {
-    pub(crate) env: Arc<ConcreteEnv>,
+    pub(crate) read_handle: BlockchainReadHandle,
     /// Chain height snapshot from when this was constructed.
     pub(crate) height: usize,
-}
-
-impl RegtestDecoyRpc {
-    fn total_rct_outputs_sync(env: &ConcreteEnv) -> Result<u64, RpcError> {
-        let env_inner = env.env_inner();
-        let tx_ro = env_inner
-            .tx_ro()
-            .map_err(|e| RpcError::InternalError(e.to_string()))?;
-        let tables = env_inner
-            .open_tables(&tx_ro)
-            .map_err(|e| RpcError::InternalError(e.to_string()))?;
-        get_rct_num_outputs(tables.rct_outputs())
-            .map_err(|e| RpcError::InternalError(e.to_string()))
-    }
-
-    fn get_rct_output_sync(
-        env: &ConcreteEnv,
-        index: u64,
-    ) -> Result<OutputInformation, RpcError> {
-        let env_inner = env.env_inner();
-        let tx_ro = env_inner
-            .tx_ro()
-            .map_err(|e| RpcError::InternalError(e.to_string()))?;
-        let tables = env_inner
-            .open_tables(&tx_ro)
-            .map_err(|e| RpcError::InternalError(e.to_string()))?;
-
-        let rct_out = get_rct_output(&index, tables.rct_outputs())
-            .map_err(|e| RpcError::InternalError(format!("rct output {index}: {e}")))?;
-
-        let key = CompressedEdwardsY(rct_out.key);
-        let commitment = CompressedEdwardsY(rct_out.commitment)
-            .decompress()
-            .ok_or_else(|| {
-                RpcError::InvalidNode(format!("rct output {index} has invalid commitment point"))
-            })?;
-
-        Ok(OutputInformation {
-            height: rct_out.height as usize,
-            // We do our own lock check in get_unlocked_outputs; report unlocked=true here.
-            unlocked: true,
-            key,
-            commitment,
-            // Regtest coinbase outputs have no separate tx blob; use zero txid.
-            transaction: [0_u8; 32],
-        })
-    }
 }
 
 impl DecoyRpc for RegtestDecoyRpc {
@@ -88,10 +32,19 @@ impl DecoyRpc for RegtestDecoyRpc {
         &self,
         range: impl Send + RangeBounds<usize>,
     ) -> impl Send + std::future::Future<Output = Result<Vec<u64>, RpcError>> {
-        let env = Arc::clone(&self.env);
+        let mut read_handle = self.read_handle.clone();
         let chain_height = self.height;
         async move {
-            let total_rct = Self::total_rct_outputs_sync(&env)?;
+            let BlockchainResponse::TotalRctOutputs(total_rct) = read_handle
+                .ready()
+                .await
+                .map_err(|e| RpcError::InternalError(e.to_string()))?
+                .call(BlockchainReadRequest::TotalRctOutputs)
+                .await
+                .map_err(|e| RpcError::InternalError(e.to_string()))?
+            else {
+                return Err(RpcError::InternalError("unexpected response".into()));
+            };
 
             // Resolve inclusive bounds.
             let from = match range.start_bound() {
@@ -113,7 +66,8 @@ impl DecoyRpc for RegtestDecoyRpc {
 
             // The first block that contributes an RCT output starts at offset
             // `rct_start = chain_height - total_rct` (0-indexed).
-            let rct_start = chain_height.saturating_sub(usize::try_from(total_rct).unwrap_or(usize::MAX));
+            let rct_start = chain_height
+                .saturating_sub(usize::try_from(total_rct).unwrap_or(usize::MAX));
 
             let dist: Vec<u64> = (from..=to)
                 .map(|h| {
@@ -134,12 +88,42 @@ impl DecoyRpc for RegtestDecoyRpc {
         &self,
         indexes: &[u64],
     ) -> impl Send + std::future::Future<Output = Result<Vec<OutputInformation>, RpcError>> {
-        let env = Arc::clone(&self.env);
-        let indexes = indexes.to_vec();
+        let mut read_handle = self.read_handle.clone();
+        let outputs_req: Vec<(u64, u64)> = indexes.iter().map(|&idx| (0_u64, idx)).collect();
         async move {
-            let mut result = Vec::with_capacity(indexes.len());
-            for idx in &indexes {
-                result.push(Self::get_rct_output_sync(&env, *idx)?);
+            let BlockchainResponse::OutputsVec(grouped) = read_handle
+                .ready()
+                .await
+                .map_err(|e| RpcError::InternalError(e.to_string()))?
+                .call(BlockchainReadRequest::OutputsVec {
+                    outputs: outputs_req,
+                    get_txid: false,
+                })
+                .await
+                .map_err(|e| RpcError::InternalError(e.to_string()))?
+            else {
+                return Err(RpcError::InternalError("unexpected response".into()));
+            };
+
+            // amount=0 → single group.
+            let mut result = Vec::new();
+            for (_amount, outputs_list) in grouped {
+                for (_amount_index, on_chain) in outputs_list {
+                    let key = CompressedEdwardsY(on_chain.key.0);
+                    let commitment = CompressedEdwardsY(on_chain.commitment.0)
+                        .decompress()
+                        .ok_or_else(|| {
+                            RpcError::InvalidNode("invalid commitment point".into())
+                        })?;
+                    result.push(OutputInformation {
+                        height: on_chain.height,
+                        // We do our own lock check in get_unlocked_outputs; report unlocked=true here.
+                        unlocked: true,
+                        key,
+                        commitment,
+                        transaction: on_chain.txid.unwrap_or([0_u8; 32]),
+                    });
+                }
             }
             Ok(result)
         }

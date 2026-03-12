@@ -1457,11 +1457,12 @@ dependencies = [
 
 [[package]]
 name = "cuprate-regtest"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "cuprate-blockchain",
  "cuprate-consensus-rules",
  "cuprate-database",
+ "cuprate-database-service",
  "cuprate-types",
  "curve25519-dalek",
  "monero-oxide",
@@ -1470,6 +1471,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
+ "tower",
  "zeroize",
 ]
 

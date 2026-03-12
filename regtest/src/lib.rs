@@ -35,6 +35,7 @@ use monero_wallet::rpc::ScannableBlock;
 use cuprate_blockchain::{
     config::ConfigBuilder,
     ops::block::{add_block, get_block_extended_header_from_height},
+    service::{init_read_service, BlockchainReadHandle},
     tables::OpenTables,
 };
 use cuprate_consensus_rules::{
@@ -43,6 +44,7 @@ use cuprate_consensus_rules::{
     miner_tx::calculate_block_reward,
 };
 use cuprate_database::{ConcreteEnv, Env, EnvInner, TxRw};
+use cuprate_database_service::ReaderThreads;
 use cuprate_types::{ExtendedBlockHeader, VerifiedBlockInformation, VerifiedTransactionInformation};
 
 /// Placeholder output key for non-scanned coinbase outputs (regtest only).
@@ -168,6 +170,7 @@ fn make_verified(
 /// Drop cleans up the temp directory automatically.
 pub struct RegtestNode {
     env: Arc<ConcreteEnv>,
+    read_handle: BlockchainReadHandle,
     _tmp: TempDir,
     /// Next block height to be mined (= number of blocks committed so far).
     height: usize,
@@ -195,6 +198,8 @@ impl RegtestNode {
             .data_directory(tmp.path().to_owned())
             .build();
         let env = Arc::new(cuprate_blockchain::open(config).expect("open blockchain db"));
+        let read_handle =
+            init_read_service(Arc::clone(&env), ReaderThreads::default());
 
         let hf = HardFork::V1;
         let genesis_reward = calculate_block_reward(0, PENALTY_FREE_ZONE_1, 0, hf);
@@ -229,6 +234,7 @@ impl RegtestNode {
 
         Self {
             env,
+            read_handle,
             _tmp: tmp,
             height: 1,
             top_hash: genesis_hash,
@@ -315,7 +321,7 @@ impl RegtestNode {
     /// Returns a [`RegtestDecoyRpc`] with a height snapshot taken at call time.
     pub fn decoy_rpc(&self) -> RegtestDecoyRpc {
         RegtestDecoyRpc {
-            env: Arc::clone(&self.env),
+            read_handle: self.read_handle.clone(),
             height: self.height,
         }
     }
@@ -615,7 +621,7 @@ mod tests {
 
         // past the coinbase lock window; need a fresh snapshot at that height
         let rpc62 = RegtestDecoyRpc {
-            env: Arc::clone(&rpc.env),
+            read_handle: rpc.read_handle.clone(),
             height: 62,
         };
         let unlocked = rpc62
