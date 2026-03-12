@@ -1,6 +1,6 @@
 //! [`DecoyRpc`] impl backed by the blockchain read service.
 
-use std::ops::RangeBounds;
+use std::{num::NonZero, ops::RangeBounds};
 
 use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint as DalekEdwardsPoint};
 
@@ -10,7 +10,10 @@ use monero_wallet::rpc::{DecoyRpc, OutputInformation, RpcError};
 use tower::{Service, ServiceExt};
 
 use cuprate_blockchain::service::BlockchainReadHandle;
-use cuprate_types::blockchain::{BlockchainReadRequest, BlockchainResponse};
+use cuprate_types::{
+    blockchain::{BlockchainReadRequest, BlockchainResponse},
+    OutputDistributionInput,
+};
 
 /// [`DecoyRpc`] backed by the blockchain read service.
 #[derive(Clone)]
@@ -35,17 +38,6 @@ impl DecoyRpc for RegtestDecoyRpc {
         let mut read_handle = self.read_handle.clone();
         let chain_height = self.height;
         async move {
-            let BlockchainResponse::TotalRctOutputs(total_rct) = read_handle
-                .ready()
-                .await
-                .map_err(|e| RpcError::InternalError(e.to_string()))?
-                .call(BlockchainReadRequest::TotalRctOutputs)
-                .await
-                .map_err(|e| RpcError::InternalError(e.to_string()))?
-            else {
-                return Err(RpcError::InternalError("unexpected response".into()));
-            };
-
             // Resolve inclusive bounds.
             let from = match range.start_bound() {
                 std::ops::Bound::Included(&f) => f,
@@ -64,23 +56,38 @@ impl DecoyRpc for RegtestDecoyRpc {
                 )));
             }
 
-            // The first block that contributes an RCT output starts at offset
-            // `rct_start = chain_height - total_rct` (0-indexed).
-            let rct_start = chain_height
-                .saturating_sub(usize::try_from(total_rct).unwrap_or(usize::MAX));
+            // Block 0 is always V1 (no RCT outputs). NonZero cannot represent
+            // to_height=0, but that edge case only requests the genesis which
+            // has a cumulative RCT count of 0.
+            if to == 0 {
+                return Ok(vec![0_u64; to - from + 1]);
+            }
 
-            let dist: Vec<u64> = (from..=to)
-                .map(|h| {
-                    if h < rct_start {
-                        0_u64
-                    } else {
-                        // Number of HF12+ blocks from rct_start up to and including h.
-                        (h - rct_start + 1) as u64
-                    }
-                })
-                .collect();
+            let input = OutputDistributionInput {
+                amounts: vec![0],
+                cumulative: true,
+                from_height: from as u64,
+                to_height: NonZero::new(to as u64),
+            };
 
-            Ok(dist)
+            let BlockchainResponse::OutputDistribution(mut data) = read_handle
+                .ready()
+                .await
+                .map_err(|e| RpcError::InternalError(e.to_string()))?
+                .call(BlockchainReadRequest::OutputDistribution(input))
+                .await
+                .map_err(|e| RpcError::InternalError(e.to_string()))?
+            else {
+                return Err(RpcError::InternalError("unexpected response".into()));
+            };
+
+            if data.is_empty() {
+                return Err(RpcError::InternalError(
+                    "empty distribution response".into(),
+                ));
+            }
+
+            Ok(data.remove(0).distribution)
         }
     }
 
