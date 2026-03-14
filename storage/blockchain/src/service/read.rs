@@ -944,7 +944,15 @@ fn block_by_hash(env: &ConcreteEnv, block_hash: BlockHash) -> ResponseResult {
 
 /// [`BlockchainReadRequest::TotalTxCount`]
 fn total_tx_count(env: &ConcreteEnv) -> ResponseResult {
-    Ok(BlockchainResponse::TotalTxCount(todo!()))
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro()?;
+    let len = env_inner.open_db_ro::<TxIds>(&tx_ro)?.len()?;
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "INVARIANT: #[cfg] @ lib.rs asserts `usize == u64`"
+    )]
+    Ok(BlockchainResponse::TotalTxCount(len as usize))
 }
 
 /// [`BlockchainReadRequest::DatabaseSize`]
