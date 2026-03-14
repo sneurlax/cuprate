@@ -1,7 +1,6 @@
 //! Database reader thread-pool definitions and logic.
 
 #![expect(
-    unreachable_code,
     unused_variables,
     clippy::unnecessary_wraps,
     clippy::needless_pass_by_value,
@@ -1186,10 +1185,56 @@ fn alt_chain_count(env: &ConcreteEnv) -> ResponseResult {
 
 /// [`BlockchainReadRequest::Transactions`]
 fn transactions(env: &ConcreteEnv, tx_hashes: HashSet<[u8; 32]>) -> ResponseResult {
-    Ok(BlockchainResponse::Transactions {
-        txs: todo!(),
-        missed_txs: todo!(),
-    })
+    use cuprate_types::TxInBlockchain;
+
+    let env_inner = env.env_inner();
+    let tx_ro = thread_local(env);
+    let tables = thread_local(env);
+
+    let chain_height = {
+        let tx_ro = env_inner.tx_ro()?;
+        let t = env_inner.open_db_ro::<BlockHeights>(&tx_ro)?;
+        crate::ops::blockchain::chain_height(&t)?
+    };
+
+    let (txs, missed_txs): (Vec<TxInBlockchain>, Vec<[u8; 32]>) = tx_hashes
+        .into_par_iter()
+        .map(|tx_hash| {
+            let tx_ro = tx_ro.get_or_try(|| env_inner.tx_ro())?;
+            let tables = get_tables!(env_inner, tx_ro, tables)?.as_ref();
+
+            let tx_id = match tables.tx_ids().get(&tx_hash) {
+                Ok(id) => id,
+                Err(RuntimeError::KeyNotFound) => return Ok(Either::Right(tx_hash)),
+                Err(e) => return Err(e),
+            };
+
+            let tx_blob = tables.tx_blobs().get(&tx_id)?.0;
+            let block_height = tables.tx_heights().get(&tx_id)? as u64;
+            let block_timestamp = get_block_info(
+                &(block_height as usize),
+                tables.block_infos(),
+            )?
+            .timestamp;
+            let output_indices = tables.tx_outputs().get(&tx_id)?.0;
+
+            let confirmations = (chain_height as u64).saturating_sub(block_height);
+
+            Ok(Either::Left(TxInBlockchain {
+                block_height,
+                block_timestamp,
+                confirmations,
+                output_indices,
+                tx_hash,
+                tx_blob,
+                pruned_blob: vec![],
+                prunable_blob: vec![],
+                prunable_hash: [0; 32],
+            }))
+        })
+        .collect::<DbResult<_>>()?;
+
+    Ok(BlockchainResponse::Transactions { txs, missed_txs })
 }
 
 /// [`BlockchainReadRequest::TotalRctOutputs`]
