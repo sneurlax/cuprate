@@ -24,7 +24,7 @@ use rayon::{
 };
 use thread_local::ThreadLocal;
 
-use cuprate_database::{ConcreteEnv, DatabaseRo, DbResult, Env, EnvInner, RuntimeError};
+use cuprate_database::{ConcreteEnv, DatabaseIter, DatabaseRo, DbResult, Env, EnvInner, RuntimeError};
 use cuprate_database_service::{init_thread_pool, DatabaseReadService, ReaderThreads};
 use cuprate_helper::map::combine_low_high_bits_to_u128;
 use cuprate_types::{
@@ -1000,7 +1000,61 @@ fn free_space_on(path: &std::path::Path) -> std::io::Result<u64> {
 
 /// [`BlockchainReadRequest::OutputHistogram`]
 fn output_histogram(env: &ConcreteEnv, input: OutputHistogramInput) -> ResponseResult {
-    Ok(BlockchainResponse::OutputHistogram(todo!()))
+    use cuprate_types::rpc::OutputHistogramEntry;
+
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro()?;
+    let tables = env_inner.open_tables(&tx_ro)?;
+
+    let rct_count = tables.rct_outputs().len()?;
+
+    // Collect (amount, count) pairs for the requested amounts.
+    // If `amounts` is empty, iterate *all* known pre-RCT amounts plus amount 0.
+    let pairs: Vec<(u64, u64)> = if input.amounts.is_empty() {
+        let mut v: Vec<(u64, u64)> = tables
+            .num_outputs_iter()
+            .iter()?
+            .map(|r| r.map(|(amount, count)| (amount, count)))
+            .collect::<DbResult<_>>()?;
+
+        if rct_count > 0 {
+            v.push((0, rct_count));
+        }
+
+        v
+    } else {
+        input
+            .amounts
+            .iter()
+            .map(|&amount| {
+                let count = if amount == 0 {
+                    rct_count
+                } else {
+                    match tables.num_outputs().get(&amount) {
+                        Ok(c) => c,
+                        Err(RuntimeError::KeyNotFound) => 0,
+                        Err(e) => return Err(e),
+                    }
+                };
+                Ok((amount, count))
+            })
+            .collect::<DbResult<_>>()?
+    };
+
+    let histogram = pairs
+        .into_iter()
+        .filter(|&(_, count)| {
+            count >= input.min_count && (input.max_count == 0 || count <= input.max_count)
+        })
+        .map(|(amount, total_instances)| OutputHistogramEntry {
+            amount,
+            total_instances,
+            unlocked_instances: 0,
+            recent_instances: 0,
+        })
+        .collect();
+
+    Ok(BlockchainResponse::OutputHistogram(histogram))
 }
 
 /// [`BlockchainReadRequest::CoinbaseTxSum`]
