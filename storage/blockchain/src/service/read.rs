@@ -957,10 +957,45 @@ fn total_tx_count(env: &ConcreteEnv) -> ResponseResult {
 
 /// [`BlockchainReadRequest::DatabaseSize`]
 fn database_size(env: &ConcreteEnv) -> ResponseResult {
+    let database_size = env.disk_size_bytes()?;
+    let free_space = free_space_on(env.config().db_directory())?;
+
     Ok(BlockchainResponse::DatabaseSize {
-        database_size: todo!(),
-        free_space: todo!(),
+        database_size,
+        free_space,
     })
+}
+
+/// Return available bytes on the filesystem containing `path`.
+fn free_space_on(path: &std::path::Path) -> std::io::Result<u64> {
+    use std::ffi::CString;
+
+    extern "C" {
+        fn statvfs(path: *const std::ffi::c_char, buf: *mut Statvfs) -> std::ffi::c_int;
+    }
+
+    // Matches the Linux `struct statvfs` layout (glibc/musl).
+    #[repr(C)]
+    struct Statvfs {
+        f_bsize: u64,
+        f_frsize: u64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        _rest: [u8; 256],
+    }
+
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(std::io::Error::other)?;
+
+    // SAFETY: zeroed `Statvfs` is valid; the path pointer lives for the call.
+    unsafe {
+        let mut stat: Statvfs = std::mem::zeroed();
+        if statvfs(c_path.as_ptr(), &mut stat) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(stat.f_bavail * stat.f_frsize)
+    }
 }
 
 /// [`BlockchainReadRequest::OutputHistogram`]
