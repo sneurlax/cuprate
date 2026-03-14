@@ -1114,12 +1114,74 @@ fn coinbase_tx_sum(env: &ConcreteEnv, height: usize, count: u64) -> ResponseResu
 
 /// [`BlockchainReadRequest::AltChains`]
 fn alt_chains(env: &ConcreteEnv) -> ResponseResult {
-    Ok(BlockchainResponse::AltChains(todo!()))
+    use cuprate_types::rpc::ChainInfo;
+
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro()?;
+    let tables = env_inner.open_tables(&tx_ro)?;
+
+    let mut chains = Vec::new();
+
+    for entry in tables.alt_chain_infos_iter().iter()? {
+        let (raw_chain_id, info) = entry?;
+        let chain_id: ChainId = raw_chain_id.into();
+
+        let ranges =
+            get_alt_chain_history_ranges(0..info.chain_height, chain_id, tables.alt_chain_infos())?;
+
+        // Collect block hashes for only the divergent alt blocks (skip
+        // the main-chain portion that `get_alt_chain_history_ranges`
+        // appends at the end of the vec).
+        let mut block_hashes = Vec::new();
+        for (chain, range) in ranges.iter().rev() {
+            let Chain::Alt(alt_id) = chain else {
+                continue;
+            };
+            let raw_id = (*alt_id).into();
+            for h in range.clone() {
+                let alt_height = AltBlockHeight {
+                    chain_id: raw_id,
+                    height: h,
+                };
+                block_hashes.push(tables.alt_blocks_info().get(&alt_height)?.block_hash);
+            }
+        }
+
+        // The tip block of the alt chain.
+        let tip_height = info.chain_height.saturating_sub(1);
+        let tip = tables.alt_blocks_info().get(&AltBlockHeight {
+            chain_id: raw_chain_id,
+            height: tip_height,
+        })?;
+
+        // The main-chain parent at the fork point.
+        let main_chain_parent_block =
+            get_block_info(&info.common_ancestor_height, tables.block_infos())?.block_hash;
+
+        let length = (info.chain_height - info.common_ancestor_height - 1) as u64;
+
+        chains.push(ChainInfo {
+            block_hash: tip.block_hash,
+            block_hashes,
+            difficulty: tip.cumulative_difficulty_low,
+            difficulty_top64: tip.cumulative_difficulty_high,
+            height: tip_height as u64,
+            length,
+            main_chain_parent_block,
+        });
+    }
+
+    Ok(BlockchainResponse::AltChains(chains))
 }
 
 /// [`BlockchainReadRequest::AltChainCount`]
 fn alt_chain_count(env: &ConcreteEnv) -> ResponseResult {
-    Ok(BlockchainResponse::AltChainCount(todo!()))
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro()?;
+    let tables = env_inner.open_tables(&tx_ro)?;
+    let count = tables.alt_chain_infos().len()? as usize;
+
+    Ok(BlockchainResponse::AltChainCount(count))
 }
 
 /// [`BlockchainReadRequest::Transactions`]
