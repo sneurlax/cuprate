@@ -84,6 +84,7 @@ fn simple_type_balances(rct_sig: &RctProofs) -> Result<(), RingCTError> {
     let sum_inputs = pseudo_outs
         .iter()
         .map(CompressedPoint::decompress)
+        .map(|point| point.map(|point| point.into()))
         .sum::<Option<EdwardsPoint>>()
         .ok_or(RingCTError::SimpleAmountDoNotBalance)?;
 
@@ -92,6 +93,7 @@ fn simple_type_balances(rct_sig: &RctProofs) -> Result<(), RingCTError> {
         .commitments
         .iter()
         .map(CompressedPoint::decompress)
+        .map(|point| point.map(|point| point.into()))
         .sum::<Option<EdwardsPoint>>()
         .ok_or(RingCTError::SimpleAmountDoNotBalance)?
         + Scalar::from(rct_sig.base.fee) * *H;
