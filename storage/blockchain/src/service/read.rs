@@ -55,7 +55,7 @@ use crate::{
     },
     tables::{
         AltBlockHeights, BlockHeights, BlockInfos, OpenTables, RctOutputs, Tables, TablesIter,
-        TxIds, TxOutputs,
+        TxBlobs, TxIds, TxOutputs,
     },
     types::{
         AltBlockHeight, Amount, AmountIndex, BlockHash, BlockHeight, KeyImage, PreRctOutputId,
@@ -1059,7 +1059,57 @@ fn output_histogram(env: &ConcreteEnv, input: OutputHistogramInput) -> ResponseR
 
 /// [`BlockchainReadRequest::CoinbaseTxSum`]
 fn coinbase_tx_sum(env: &ConcreteEnv, height: usize, count: u64) -> ResponseResult {
-    Ok(BlockchainResponse::CoinbaseTxSum(todo!()))
+    use cuprate_helper::map::split_u128_into_low_high_bits;
+    use cuprate_types::rpc::CoinbaseTxSum;
+    use monero_oxide::transaction::Transaction;
+
+    let env_inner = env.env_inner();
+    let tx_ro = env_inner.tx_ro()?;
+    let table_block_infos = env_inner.open_db_ro::<BlockInfos>(&tx_ro)?;
+    let table_tx_blobs = env_inner.open_db_ro::<TxBlobs>(&tx_ro)?;
+
+    let mut emission: u128 = 0;
+    let mut fee: u128 = 0;
+
+    let end = height.saturating_add(count as usize);
+    for h in height..end {
+        let bi = match get_block_info(&h, &table_block_infos) {
+            Ok(bi) => bi,
+            Err(RuntimeError::KeyNotFound) => break,
+            Err(e) => return Err(e),
+        };
+
+        let prev_coins = if h == 0 {
+            0
+        } else {
+            get_block_info(&(h - 1), &table_block_infos)?.cumulative_generated_coins
+        };
+
+        let generated = bi.cumulative_generated_coins.saturating_sub(prev_coins);
+        emission += u128::from(generated);
+
+        // Fee = coinbase outputs - generated coins.
+        let miner_blob = table_tx_blobs.get(&bi.mining_tx_index)?.0;
+        let miner_tx: Transaction = Transaction::read(&mut miner_blob.as_slice())?;
+        let coinbase_out_total: u64 = miner_tx
+            .prefix()
+            .outputs
+            .iter()
+            .map(|o| o.amount.unwrap_or(0))
+            .sum();
+
+        fee += u128::from(coinbase_out_total.saturating_sub(generated));
+    }
+
+    let (emission_amount, emission_amount_top64) = split_u128_into_low_high_bits(emission);
+    let (fee_amount, fee_amount_top64) = split_u128_into_low_high_bits(fee);
+
+    Ok(BlockchainResponse::CoinbaseTxSum(CoinbaseTxSum {
+        emission_amount,
+        emission_amount_top64,
+        fee_amount,
+        fee_amount_top64,
+    }))
 }
 
 /// [`BlockchainReadRequest::AltChains`]
